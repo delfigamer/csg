@@ -1,0 +1,655 @@
+{-# LANGUAGE UnboxedTuples #-}
+{-# LANGUAGE UnboxedSums #-}
+
+module Data.IntervalMap.ITreeUnboxed where
+
+import Data.Coerce
+import Data.Interval
+import Data.Peano
+import Data.Semigroup
+
+type IntervalMap = ITree
+
+data family Node (p :: P) :: * -> * -> *
+
+newtype instance Node 'Z k v
+    = Leaf v
+
+data instance Node ('S p) k v
+    = Node
+        (#   (# Node p k v, k, Node p k v #)
+        |    (# Node p k v, k, Node p k v, k, Node p k v #)
+        |    (# Node p k v, k, Node p k v, k, Node p k v, k, Node p k v #)
+        #)
+
+instance (KnownP p, Show k, Show v) => Show (Node p k v) where
+    showsPrec di node = showsPrecNode di knownPI node
+
+showsPrecNode :: (Show k, Show v) => Int -> PI p -> Node p k v -> ShowS
+showsPrecNode di p node =
+    case p of
+        ZI ->
+            case node of
+                Leaf x ->
+                    showParen (di > 10) $
+                        showString "Leaf " .
+                        showsPrec 11 x
+        SI np ->
+            case node of
+                Node (# (# a1, ak12, a2 #) | | #) ->
+                    showParen (di > 10) $
+                        showString "N2 " .
+                        showsPrecNode 11 np a1 .
+                        showString " " .
+                        showsPrec 11 ak12 .
+                        showString " " .
+                        showsPrecNode 11 np a2
+                Node (# | (# a1, ak12, a2, ak23, a3 #) | #) ->
+                    showParen (di > 10) $
+                        showString "N3 " .
+                        showsPrecNode 11 np a1 .
+                        showString " " .
+                        showsPrec 11 ak12 .
+                        showString " " .
+                        showsPrecNode 11 np a2 .
+                        showString " " .
+                        showsPrec 11 ak23 .
+                        showString " " .
+                        showsPrecNode 11 np a3
+                Node (# | | (# a1, ak12, a2, ak23, a3, ak34, a4 #) #) ->
+                    showParen (di > 10) $
+                        showString "N4 " .
+                        showsPrecNode 11 np a1 .
+                        showString " " .
+                        showsPrec 11 ak12 .
+                        showString " " .
+                        showsPrecNode 11 np a2 .
+                        showString " " .
+                        showsPrec 11 ak23 .
+                        showString " " .
+                        showsPrecNode 11 np a3 .
+                        showString " " .
+                        showsPrec 11 ak34 .
+                        showString " " .
+                        showsPrecNode 11 np a4
+
+data JoinResult p k v
+    = One (Node p k v)
+    | Two (Node p k v) k (Node p k v)
+
+deriving instance (KnownP p, Show k, Show v) => Show (JoinResult p k v)
+
+data SomeNode k v
+    = forall p. SomeNode (PI p) (Node p k v)
+
+instance (Show k, Show v) => Show (SomeNode k v) where
+    showsPrec di (SomeNode p node) =
+        showParen (di > 10) $
+            showString "SomeNode " .
+            showsPrec 11 p .
+            showString " " .
+            showsPrecNode 11 p node
+
+data LinearInterior k v
+    = ConsLI v k (LinearInterior k v)
+    | LastLI v
+    deriving (Show)
+
+data ITree k v
+    = forall p. FullT (PI p) k (Node p k v) k
+    | EmptyT
+
+instance (Show k, Show v) => Show (ITree k v) where
+    showsPrec di (FullT p kt1 node kt2) =
+        showParen (di > 10) $
+            showString "FullT " .
+            showsPrec 11 p .
+            showString " " .
+            showsPrec 11 kt1 .
+            showString " " .
+            showsPrecNode 11 p node .
+            showString " " .
+            showsPrec 11 kt2
+    showsPrec _ EmptyT =
+        showString "EmptyT"
+
+instance (Ord k, Monoid v) => Semigroup (ITree k v) where
+    (<>) = unifyITree
+
+instance (Ord k, Monoid v) => Monoid (ITree k v) where
+    mempty = EmptyT
+
+empty :: ITree k v
+empty =
+    EmptyT
+
+singleton ::
+    (Ord k) =>
+    Interval k ->
+    v ->
+    ITree k v
+singleton (Interval k1 k2) x
+    | k1 < k2 =
+        FullT ZI k1 (Leaf x) k2
+    | otherwise =
+        EmptyT
+
+toIntervalList ::
+    ITree k v ->
+    [(Interval k, v)]
+toIntervalList tree =
+    flip appEndo [] $
+        foldMapIntervals
+            (\i v -> Endo $ \t -> (i, v) : t)
+            tree
+
+foldMapIntervals ::
+    (Monoid m) =>
+    (Interval k -> v -> m) ->
+    ITree k v ->
+    m
+foldMapIntervals _ EmptyT = mempty
+foldMapIntervals fn (FullT ap akt1 anode akt2) =
+    foldMapIntervalsNode fn ap akt1 anode akt2
+
+foldMapIntervalsNode ::
+    (Monoid m) =>
+    (Interval k -> v -> m) ->
+    PI p ->
+    k ->
+    Node p k v ->
+    k ->
+    m
+foldMapIntervalsNode fn p akt1 anode akt2 =
+    case p of
+        ZI ->
+            case anode of
+                Leaf x ->
+                    fn (Interval akt1 akt2) x
+        SI np ->
+            case anode of
+                Node (# (# a1, ak12, a2 #) | | #) ->
+                    foldMapIntervalsNode fn np akt1 a1 ak12 <>
+                    foldMapIntervalsNode fn np ak12 a2 akt2
+                Node (# | (# a1, ak12, a2, ak23, a3 #) | #) ->
+                    foldMapIntervalsNode fn np akt1 a1 ak12 <>
+                    foldMapIntervalsNode fn np ak12 a2 ak23 <>
+                    foldMapIntervalsNode fn np ak23 a3 akt2
+                Node (# | | (# a1, ak12, a2, ak23, a3, ak34, a4 #) #) ->
+                    foldMapIntervalsNode fn np akt1 a1 ak12 <>
+                    foldMapIntervalsNode fn np ak12 a2 ak23 <>
+                    foldMapIntervalsNode fn np ak23 a3 ak34 <>
+                    foldMapIntervalsNode fn np ak34 a4 akt2
+
+{-
+    Possible orderings:     | left       | right      | a overlap       | b overlap
+        akt1 akt2 bkt1 bkt2 | atree      |      btree |      -          |      -
+        akt1 bkt1 akt2 bkt2 | atree>bkt1 | akt2<btree | bkt1<atree      |      btree>akt2
+        akt1 bkt1 bkt2 akt2 | atree>bkt1 | bkt2<atree | bkt1<atree>bkt2 |      btree
+        bkt1 akt1 akt2 bkt2 | btree>akt1 | akt2<btree |      atree      | akt1<btree>akt2
+        bkt1 akt1 bkt2 akt2 | btree>akt1 | bkt2<atree |      atree>bkt2 | akt1<btree
+        bkt1 bkt2 akt1 akt2 | btree      |      atree |      -          |      -
+-}
+unifyITree ::
+    (Ord k, Monoid v) =>
+    ITree k v ->
+    ITree k v ->
+    ITree k v
+unifyITree EmptyT btree = btree
+unifyITree atree EmptyT = atree
+unifyITree atree@(FullT _ akt1 _ akt2) btree@(FullT _ bkt1 _ bkt2) =
+    left `joinITree` unifiedOverlap `joinITree` right
+  where
+    left
+        | akt2 <= bkt1 =
+            atree
+        | bkt2 <= akt1 =
+            btree
+        | akt1 <= bkt1 =
+            clipRightITree bkt1 atree
+        | otherwise =
+            clipRightITree akt1 btree
+    right
+        | akt2 <= bkt1 =
+            btree
+        | bkt2 <= akt1 =
+            atree
+        | akt2 <= bkt2 =
+            clipLeftITree akt2 btree
+        | otherwise =
+            clipLeftITree bkt2 atree
+    aoverlap =
+        clipLeftITree bkt1 $
+        clipRightITree bkt2 $
+        atree
+    boverlap =
+        clipLeftITree akt1 $
+        clipRightITree akt2 $
+        btree
+    unifiedOverlap =
+        case (aoverlap, boverlap) of
+            (EmptyT, _) ->
+                boverlap
+            (_, EmptyT) ->
+                aoverlap
+            (FullT oap okt1 oanode okt2, FullT obp _ obnode _) ->
+                case
+                    unlinearizeNode $
+                        unifyLinearInteriors
+                            (linearizeNode oap oanode)
+                            (linearizeNode obp obnode)
+                  of
+                    SomeNode orp ornode ->
+                        FullT orp okt1 ornode okt2
+
+unlinearizeNode ::
+    LinearInterior k v ->
+    SomeNode k v
+unlinearizeNode li = unlinearizeNodeRec ZI (coerce li)
+
+unlinearizeNodeRec ::
+    PI p ->
+    LinearInterior k (Node p k v) ->
+    SomeNode k v
+unlinearizeNodeRec p li =
+    case li of
+        LastLI a1 ->
+            SomeNode p a1
+        ConsLI a1 ak12 a2rest ->
+            unlinearizeNodeRec
+                (SI p)
+                (unlinearizeNodeStep a1 ak12 a2rest)
+
+unlinearizeNodeStep ::
+    Node p k v ->
+    k ->
+    LinearInterior k (Node p k v) ->
+    LinearInterior k (Node ('S p) k v)
+unlinearizeNodeStep a1 ak12 = \case
+    LastLI a2 ->
+        LastLI (Node (# (# a1, ak12, a2 #) | | #))
+    ConsLI a2 ak23 (LastLI a3) ->
+        LastLI (Node (# | (# a1, ak12, a2, ak23, a3 #) | #))
+    ConsLI a2 ak23 (ConsLI a3 ak34 (LastLI a4)) ->
+        LastLI (Node (# | | (# a1, ak12, a2, ak23, a3, ak34, a4 #) #))
+    ConsLI a2 ak23 (ConsLI a3 ak34 (ConsLI a4 ak45 (LastLI a5))) ->
+        ConsLI (Node (# | (# a1, ak12, a2, ak23, a3 #) | #)) ak34 $
+        LastLI (Node (# (# a4, ak45, a5 #) | | #))
+    ConsLI a2 ak23 (ConsLI a3 ak34 (ConsLI a4 ak45 (ConsLI a5 ak56 (LastLI a6)))) ->
+        ConsLI (Node (# | (# a1, ak12, a2, ak23, a3 #) | #)) ak34 $
+        LastLI (Node (# | (# a4, ak45, a5, ak56, a6 #) | #))
+    ConsLI a2 ak23 (ConsLI a3 ak34 (ConsLI a4 ak45 (ConsLI a5 ak56 a6rest@(ConsLI _ _ _)))) ->
+        ConsLI (Node (# | | (# a1, ak12, a2, ak23, a3, ak34, a4 #) #)) ak45 $
+        unlinearizeNodeStep a5 ak56 a6rest
+
+linearizeNode ::
+    PI p ->
+    Node p k v ->
+    LinearInterior k v
+linearizeNode p node = foldrNode p node ConsLI LastLI
+
+foldrNode ::
+    PI p ->
+    Node p k v ->
+    (v -> k -> r -> r) ->
+    (v -> r) ->
+    r
+foldrNode p node fn seed =
+    case p of
+        ZI ->
+            case node of
+                Leaf v -> seed v
+        SI np ->
+            case node of
+                Node (# (# a1, ak12, a2 #) | | #) ->
+                    foldrNode np a1 fn $ \v1 -> fn v1 ak12 $
+                    foldrNode np a2 fn seed
+                Node (# | (# a1, ak12, a2, ak23, a3 #) | #) ->
+                    foldrNode np a1 fn $ \v1 -> fn v1 ak12 $
+                    foldrNode np a2 fn $ \v2 -> fn v2 ak23 $
+                    foldrNode np a3 fn seed
+                Node (# | | (# a1, ak12, a2, ak23, a3, ak34, a4 #) #) ->
+                    foldrNode np a1 fn $ \v1 -> fn v1 ak12 $
+                    foldrNode np a2 fn $ \v2 -> fn v2 ak23 $
+                    foldrNode np a3 fn $ \v3 -> fn v3 ak34 $
+                    foldrNode np a4 fn seed
+
+joinITree ::
+    (Ord k, Monoid v) =>
+    ITree k v ->
+    ITree k v ->
+    ITree k v
+joinITree EmptyT btree = btree
+joinITree atree EmptyT = atree
+joinITree (FullT ap akt1 anode akt2) (FullT bp bkt1 bnode bkt2) =
+    case compare akt2 bkt1 of
+        LT ->
+            case joinITreeNode ap anode akt2 ZI (Leaf mempty) of
+                SomeNode qp qnode ->
+                    case joinITreeNode qp qnode bkt1 bp bnode of
+                        SomeNode rp rnode ->
+                            FullT rp akt1 rnode bkt2
+        EQ ->
+            case joinITreeNode ap anode akt2 bp bnode of
+                SomeNode rp rnode ->
+                    FullT rp akt1 rnode bkt2
+        GT ->
+            error "overlapping ITrees"
+
+joinITreeNode ::
+    PI ap ->
+    Node ap k v ->
+    k ->
+    PI bp ->
+    Node bp k v ->
+    SomeNode k v
+joinITreeNode ap anode dk bp bnode =
+    case comparePI ap bp of
+        LTPI dp ->
+            joinResultToSomeNode
+                bp
+                (joinITreeNodeLeft ap dp anode dk bnode)
+        EQPI ->
+            joinResultToSomeNode
+                ap
+                (joinITreeNodeSymmetric ap anode dk bnode)
+        GTPI dp ->
+            joinResultToSomeNode
+                ap
+                (joinITreeNodeRight bp dp anode dk bnode)
+
+joinResultToSomeNode ::
+    PI p ->
+    JoinResult p k v ->
+    SomeNode k v
+joinResultToSomeNode p = \case
+    One r ->
+        SomeNode p r
+    Two r1 rk12 r2 ->
+        SomeNode (SI p) (Node (# (# r1, rk12, r2 #) | | #))
+
+joinITreeNodeSymmetric ::
+    PI p ->
+    Node p k v ->
+    k ->
+    Node p k v ->
+    JoinResult p k v
+joinITreeNodeSymmetric p anode dk bnode =
+    case p of
+        SI _ ->
+            case (anode, bnode) of
+                (   Node (# (# a1, ak12, a2 #) | | #)
+                  , Node (# (# b1, bk12, b2 #) | | #)
+                  )
+                  ->
+                    One (Node (# | | (# a1, ak12, a2, dk, b1, bk12, b2 #) #))
+                (   Node (# | | (# a1, ak12, a2, ak23, a3, ak34, a4 #) #)
+                  , Node (# (# b1, bk12, b2 #) | | #)
+                  ) ->
+                    Two
+                        (Node (# | (# a1, ak12, a2, ak23, a3 #) | #))
+                        ak34
+                        (Node (# | (# a4, dk, b1, bk12, b2 #) | #))
+                (   Node (# (# a1, ak12, a2 #) | | #)
+                  , Node (# | | (# b1, bk12, b2, bk23, b3, bk34, b4 #) #)
+                  ) ->
+                    Two
+                        (Node (# | (# a1, ak12, a2, dk, b1 #) | #))
+                        bk12
+                        (Node (# | (# b2, bk23, b3, bk34, b4 #) | #))
+                _ ->
+                    Two anode dk bnode
+        ZI ->
+            Two anode dk bnode
+
+joinITreeNodeLeft ::
+    PI ap ->
+    PI dp ->
+    Node ap k v ->
+    k ->
+    Node (Add dp ap) k v ->
+    JoinResult (Add dp ap) k v
+joinITreeNodeLeft ap ZI anode dk bnode =
+    joinITreeNodeSymmetric ap anode dk bnode
+joinITreeNodeLeft ap (SI ndp) anode dk bnode =
+    expandNodeLeft bnode $ \b1 ->
+        joinITreeNodeLeft ap ndp anode dk b1
+
+joinITreeNodeRight ::
+    PI bp ->
+    PI dp ->
+    Node (Add dp bp) k v ->
+    k ->
+    Node bp k v ->
+    JoinResult (Add dp bp) k v
+joinITreeNodeRight bp ZI anode dk bnode =
+    joinITreeNodeSymmetric bp anode dk bnode
+joinITreeNodeRight bp (SI ndp) anode dk bnode =
+    expandNodeRight anode $ \a4 ->
+        joinITreeNodeRight bp ndp a4 dk bnode
+
+expandNodeLeft ::
+    Node ('S p) k v ->
+    (Node p k v -> JoinResult p k v) ->
+    JoinResult ('S p) k v
+expandNodeLeft bnode fn =
+    case bnode of
+        Node (# (# b1, bk12, b2 #) | | #) ->
+            case fn b1 of
+                One a1 ->
+                    One (Node (# (# a1, bk12, b2 #) | | #))
+                Two a0 ak01 a1 ->
+                    One (Node (# | (# a0, ak01, a1, bk12, b2 #) | #))
+        Node (# | (# b1, bk12, b2, bk23, b3 #) | #) ->
+            case fn b1 of
+                One a1 ->
+                    One (Node (# | (# a1, bk12, b2, bk23, b3 #) | #))
+                Two a0 ak01 a1 ->
+                    One (Node (# | | (# a0, ak01, a1, bk12, b2, bk23, b3 #) #))
+        Node (# | | (# b1, bk12, b2, bk23, b3, bk34, b4 #) #) ->
+            case fn b1 of
+                One a1 ->
+                    One (Node (# | | (# a1, bk12, b2, bk23, b3, bk34, b4 #) #))
+                Two a0 ak01 a1 ->
+                    Two
+                        (Node (# (# a0, ak01, a1 #) | | #))
+                        bk12
+                        (Node (# | (# b2, bk23, b3, bk34, b4 #) | #))
+
+expandNodeRight ::
+    Node ('S p) k v ->
+    (Node p k v -> JoinResult p k v) ->
+    JoinResult ('S p) k v
+expandNodeRight bnode fn =
+    case bnode of
+        Node (# (# b1, bk12, b2 #) | | #) ->
+            case fn b2 of
+                One a2 ->
+                    One (Node (# (# b1, bk12, a2 #) | | #))
+                Two a2 ak23 a3 ->
+                    One (Node (# | (# b1, bk12, a2, ak23, a3 #) | #))
+        Node (# | (# b1, bk12, b2, bk23, b3 #) | #) ->
+            case fn b3 of
+                One a3 ->
+                    One (Node (# | (# b1, bk12, b2, bk23, a3 #) | #))
+                Two a3 ak34 a4 ->
+                    One (Node (# | | (# b1, bk12, b2, bk23, a3, ak34, a4 #) #))
+        Node (# | | (# b1, bk12, b2, bk23, b3, bk34, b4 #) #) ->
+            case fn b4 of
+                One a4 ->
+                    One (Node (# | | (# b1, bk12, b2, bk23, b3, bk34, a4 #) #))
+                Two a4 ak45 a5 ->
+                    Two
+                        (Node (# | (# b1, bk12, b2, bk23, b3 #) | #))
+                        bk34
+                        (Node (# (# a4, ak45, a5 #) | | #))
+
+clipLeftITree ::
+    (Ord k) =>
+    k ->
+    ITree k v ->
+    ITree k v
+clipLeftITree _ EmptyT = EmptyT
+clipLeftITree dk atree@(FullT ap akt1 anode akt2)
+    | dk <= akt1 =
+        atree
+    | dk >= akt2 =
+        EmptyT
+    | otherwise =
+        case clipLeftITreeNode dk ap anode of
+            SomeNode rp rnode ->
+                FullT rp dk rnode akt2
+
+clipLeftITreeNode ::
+    (Ord k) =>
+    k ->
+    PI p ->
+    Node p k v ->
+    SomeNode k v
+clipLeftITreeNode dk p anode =
+    case p of
+        ZI ->
+            SomeNode p anode
+        SI np ->
+            case anode of
+                Node (# (# a1, ak12, a2 #) | | #)
+                    | dk < ak12 ->
+                        on2 a1 ak12 a2
+                    | otherwise ->
+                        on1 a2
+                Node (# | (# a1, ak12, a2, ak23, a3 #) | #)
+                    | dk < ak12 ->
+                        on3 a1 ak12 a2 ak23 a3
+                    | dk < ak23 ->
+                        on2 a2 ak23 a3
+                    | otherwise ->
+                        on1 a3
+                Node (# | | (# a1, ak12, a2, ak23, a3, ak34, a4 #) #)
+                    | dk < ak12 ->
+                        on4 a1 ak12 a2 ak23 a3 ak34 a4
+                    | dk < ak23 ->
+                        on3 a2 ak23 a3 ak34 a4
+                    | dk < ak34 ->
+                        on2 a3 ak34 a4
+                    | otherwise ->
+                        on1 a4
+          where
+            on1 a1 =
+                clipLeftITreeNode dk np a1
+            on2 a1 ak12 a2 =
+                case clipLeftITreeNode dk np a1 of
+                    SomeNode bp b1 ->
+                        joinITreeNode
+                            bp b1
+                            ak12
+                            np a2
+            on3 a1 ak12 a2 ak23 a3 =
+                case clipLeftITreeNode dk np a1 of
+                    SomeNode bp b1 ->
+                        joinITreeNode
+                            bp b1
+                            ak12
+                            p (Node (# (# a2, ak23, a3 #) | | #))
+            on4 a1 ak12 a2 ak23 a3 ak34 a4 =
+                case clipLeftITreeNode dk np a1 of
+                    SomeNode bp b1 ->
+                        joinITreeNode
+                            bp b1
+                            ak12
+                            p (Node (# | (# a2, ak23, a3, ak34, a4 #) | #))
+
+clipRightITree ::
+    (Ord k) =>
+    k ->
+    ITree k v ->
+    ITree k v
+clipRightITree _ EmptyT = EmptyT
+clipRightITree dk atree@(FullT ap akt1 anode akt2)
+    | dk <= akt1 =
+        EmptyT
+    | dk >= akt2 =
+        atree
+    | otherwise =
+        case clipRightITreeNode dk ap anode of
+            SomeNode rp rnode ->
+                FullT rp akt1 rnode dk
+
+clipRightITreeNode ::
+    (Ord k) =>
+    k ->
+    PI p ->
+    Node p k v ->
+    SomeNode k v
+clipRightITreeNode dk p anode =
+    case p of
+        ZI ->
+            SomeNode p anode
+        SI np ->
+            case anode of
+                Node (# (# a1, ak12, a2 #) | | #)
+                    | dk > ak12 ->
+                        on2 a1 ak12 a2
+                    | otherwise ->
+                        on1 a1
+                Node (# | (# a1, ak12, a2, ak23, a3 #) | #)
+                    | dk > ak23 ->
+                        on3 a1 ak12 a2 ak23 a3
+                    | dk > ak12 ->
+                        on2 a1 ak12 a2
+                    | otherwise ->
+                        on1 a1
+                Node (# | | (# a1, ak12, a2, ak23, a3, ak34, a4 #) #)
+                    | dk > ak34 ->
+                        on4 a1 ak12 a2 ak23 a3 ak34 a4
+                    | dk > ak23 ->
+                        on3 a1 ak12 a2 ak23 a3
+                    | dk > ak12 ->
+                        on2 a1 ak12 a2
+                    | otherwise ->
+                        on1 a1
+          where
+            on1 a1 =
+                clipRightITreeNode dk np a1
+            on2 a1 ak12 a2 =
+                case clipRightITreeNode dk np a2 of
+                    SomeNode bp b2 ->
+                        joinITreeNode
+                            np a1
+                            ak12
+                            bp b2
+            on3 a1 ak12 a2 ak23 a3 =
+                case clipRightITreeNode dk np a3 of
+                    SomeNode bp b3 ->
+                        joinITreeNode
+                            p (Node (# (# a1, ak12, a2 #) | | #))
+                            ak23
+                            bp b3
+            on4 a1 ak12 a2 ak23 a3 ak34 a4 =
+                case clipRightITreeNode dk np a4 of
+                    SomeNode bp b4 ->
+                        joinITreeNode
+                            p (Node (# | (# a1, ak12, a2, ak23, a3 #) | #))
+                            ak34
+                            bp b4
+
+unifyLinearInteriors ::
+    (Ord k, Monoid v) =>
+    LinearInterior k v ->
+    LinearInterior k v ->
+    LinearInterior k v
+unifyLinearInteriors = go
+  where
+    go alin@(ConsLI a1 ak12 a2rest) blin@(ConsLI b1 bk12 b2rest) =
+        case compare ak12 bk12 of
+            LT ->
+                ConsLI (a1 <> b1) ak12 (go a2rest blin)
+            EQ ->
+                ConsLI (a1 <> b1) ak12 (go a2rest b2rest)
+            GT ->
+                ConsLI (a1 <> b1) bk12 (go alin b2rest)
+    go (ConsLI a1 ak12 a2rest) blin@(LastLI b1) =
+        ConsLI (a1 <> b1) ak12 (go a2rest blin)
+    go alin@(LastLI a1) (ConsLI b1 bk12 b2rest) =
+        ConsLI (a1 <> b1) bk12 (go alin b2rest)
+    go (LastLI a1) (LastLI b1) =
+        LastLI (a1 <> b1)

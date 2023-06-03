@@ -1,0 +1,251 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.35.0.
+--
+-- see: https://github.com/sol/hpack
+--
+-- hash: d0366c6ad6a49df14b886fb6dd24a45741c00eab236c30c693ff2cb80b847414
+
+name:           csg
+version:        0.1.0.0
+description:    Please see the README on GitHub at <https://github.com/githubuser/csg#readme>
+homepage:       https://github.com/githubuser/csg#readme
+bug-reports:    https://github.com/githubuser/csg/issues
+author:         Author name here
+maintainer:     example@example.com
+copyright:      2021 Author name here
+license:        BSD3
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    README.md
+    ChangeLog.md
+
+source-repository head
+  type: git
+  location: https://github.com/githubuser/csg
+
+library
+  exposed-modules:
+      Common.Debug
+      Common.Types
+      Control.Monad.State
+      Data.CList
+      Data.CSeq
+      Data.DisjointSet
+      Data.DisjointSet.WithData
+      Data.Group.Class
+      Data.Interval
+      Data.IntervalMap
+      Data.IntervalMap.EndpointMap
+      Data.MinMaxWith
+      Data.MonoidMap
+      Data.MultiMap
+      Data.MultiSet
+      Data.NubList
+      Data.Peano
+      Data.ShortVector
+      Entry
+      Export.Bvh
+      Export.Obj
+      Geometry.Algorithm.SplitFace
+      Geometry.Algorithm.Triangulate
+      Geometry.AngleRat
+      Geometry.BBox
+      Geometry.Brush
+      Geometry.Brush.Merging
+      Geometry.Brush.Type
+      Geometry.Brush.Zoning
+      Geometry.Brush.Zoning.SurfaceNumbers
+      Geometry.Class
+      Geometry.Face
+      Geometry.Mat2
+      Geometry.Mat3
+      Geometry.PlaneSpace
+      Geometry.RTree
+      Geometry.Triangle
+      Geometry.Vec2
+      Geometry.Vec3
+      Pak.Importer
+      Pak.Parser
+      Pak.Polys
+  other-modules:
+      Paths_csg
+  hs-source-dirs:
+      src
+  default-extensions:
+      BangPatterns
+      DataKinds
+      DeriveAnyClass
+      DeriveTraversable
+      DerivingVia
+      DuplicateRecordFields
+      FlexibleContexts
+      FlexibleInstances
+      FunctionalDependencies
+      GADTs
+      GeneralizedNewtypeDeriving
+      KindSignatures
+      LambdaCase
+      MultiParamTypeClasses
+      MultiWayIf
+      OverloadedStrings
+      PatternSynonyms
+      PolyKinds
+      RankNTypes
+      RecordWildCards
+      RecursiveDo
+      ScopedTypeVariables
+      StandaloneDeriving
+      TemplateHaskell
+      TypeApplications
+      TypeFamilies
+      TypeOperators
+      UndecidableInstances
+  ghc-options: -Wall -dumpdir "dump" -ddump-to-file
+  build-depends:
+      QuickCheck
+    , aeson
+    , array
+    , attoparsec
+    , base
+    , bytestring
+    , containers
+    , criterion
+    , deepseq
+    , hspec
+    , integer-roots
+    , optparse-applicative
+    , pretty
+    , pretty-show
+    , random
+    , text
+    , time
+    , vector
+    , yaml
+  default-language: Haskell2010
+
+executable csg-exe
+  main-is: Main.hs
+  other-modules:
+      Paths_csg
+  hs-source-dirs:
+      app
+  default-extensions:
+      BangPatterns
+      DataKinds
+      DeriveAnyClass
+      DeriveTraversable
+      DerivingVia
+      DuplicateRecordFields
+      FlexibleContexts
+      FlexibleInstances
+      FunctionalDependencies
+      GADTs
+      GeneralizedNewtypeDeriving
+      KindSignatures
+      LambdaCase
+      MultiParamTypeClasses
+      MultiWayIf
+      OverloadedStrings
+      PatternSynonyms
+      PolyKinds
+      RankNTypes
+      RecordWildCards
+      RecursiveDo
+      ScopedTypeVariables
+      StandaloneDeriving
+      TemplateHaskell
+      TypeApplications
+      TypeFamilies
+      TypeOperators
+      UndecidableInstances
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      QuickCheck
+    , aeson
+    , array
+    , attoparsec
+    , base
+    , bytestring
+    , containers
+    , criterion
+    , csg
+    , deepseq
+    , hspec
+    , integer-roots
+    , optparse-applicative
+    , pretty
+    , pretty-show
+    , random
+    , text
+    , time
+    , vector
+    , yaml
+  default-language: Haskell2010
+
+test-suite csg-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Data.IntervalMapSpec
+      Geometry.Brush.Spec
+      Geometry.FaceSpec
+      Geometry.PlaneSpaceSpec
+      Geometry.RTreeSpec
+      Instances
+      Paths_csg
+  hs-source-dirs:
+      test
+  default-extensions:
+      BangPatterns
+      DataKinds
+      DeriveAnyClass
+      DeriveTraversable
+      DerivingVia
+      DuplicateRecordFields
+      FlexibleContexts
+      FlexibleInstances
+      FunctionalDependencies
+      GADTs
+      GeneralizedNewtypeDeriving
+      KindSignatures
+      LambdaCase
+      MultiParamTypeClasses
+      MultiWayIf
+      OverloadedStrings
+      PatternSynonyms
+      PolyKinds
+      RankNTypes
+      RecordWildCards
+      RecursiveDo
+      ScopedTypeVariables
+      StandaloneDeriving
+      TemplateHaskell
+      TypeApplications
+      TypeFamilies
+      TypeOperators
+      UndecidableInstances
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      QuickCheck
+    , aeson
+    , array
+    , attoparsec
+    , base
+    , bytestring
+    , containers
+    , criterion
+    , csg
+    , deepseq
+    , hspec
+    , integer-roots
+    , optparse-applicative
+    , pretty
+    , pretty-show
+    , random
+    , text
+    , time
+    , vector
+    , yaml
+  default-language: Haskell2010

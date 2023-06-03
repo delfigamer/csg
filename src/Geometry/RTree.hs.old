@@ -1,0 +1,829 @@
+module Geometry.RTree
+    ( RTree
+    , map
+    , mapStable
+    , traverse
+    , traverseStable
+    , treeMerge
+    , empty
+    , singleton
+    , insert
+    , fromList
+    , traverseIntersecting
+    , foldMapStructured
+    , foldMapIntersecting
+    , foldrIntersecting
+    , concatTraverseIntersecting
+    , concatMapIntersecting
+    , filterCoarseIntersecting
+    , concatTraverseIntersectingTree
+    , concatMapIntersectingTree
+    , xAxisRaycast
+    )
+where
+
+import Prelude hiding (map, traverse)
+import Control.Monad
+import Data.Coerce
+import Data.Foldable
+import Data.Functor.Const
+import Data.Functor.Identity
+import Data.Interval
+import Data.Peano
+import Data.Semigroup
+import Geometry.BBox
+import Geometry.Vec3
+import qualified Data.Aeson as Aeson
+import qualified Data.List as List
+import qualified Data.Traversable
+
+data family NodeData (p :: P) :: * -> *
+
+newtype instance NodeData 'Z a
+    = Leaf a
+
+unwrapLeaf :: NodeData 'Z a -> a
+unwrapLeaf (Leaf x) = x
+
+data instance NodeData ('S p) a
+    = N2 (Node p a) (Node p a)
+    | N3 (Node p a) (Node p a) (Node p a)
+    | N4 (Node p a) (Node p a) (Node p a) (Node p a)
+
+subnodeList :: NodeData ('S p) a -> [Node p a]
+subnodeList (N2 a b) = [a, b]
+subnodeList (N3 a b c) = [a, b, c]
+subnodeList (N4 a b c d) = [a, b, c, d]
+
+data Node p a = Node BBox (NodeData p a)
+
+instance (KnownP p, Show a) => Show (Node p a) where
+    showsPrec di ndata = showsPrecNode di knownPI ndata
+
+showsPrecNode :: (Show a) => Int -> PI p -> Node p a -> ShowS
+showsPrecNode di p (Node _ ndata) =
+    case p of
+        ZI ->
+            case ndata of
+                Leaf x ->
+                    showParen (di > 10) $
+                        showString "nodeLeaf " .
+                        showsPrec 11 x
+        SI np ->
+            case ndata of
+                N2 a b ->
+                    showParen (di > 10) $
+                        showString "node2 " .
+                        showsPrecNode 11 np a .
+                        showString " " .
+                        showsPrecNode 11 np b
+                N3 a b c ->
+                    showParen (di > 10) $
+                        showString "node3 " .
+                        showsPrecNode 11 np a .
+                        showString " " .
+                        showsPrecNode 11 np b .
+                        showString " " .
+                        showsPrecNode 11 np c
+                N4 a b c d ->
+                    showParen (di > 10) $
+                        showString "node4 " .
+                        showsPrecNode 11 np a .
+                        showString " " .
+                        showsPrecNode 11 np b .
+                        showString " " .
+                        showsPrecNode 11 np c .
+                        showString " " .
+                        showsPrecNode 11 np d
+
+instance HasBBox (Node p a) where
+    bboxOf (Node bbox _) = bbox
+
+data OneOrTwo a
+    = One a
+    | Two a a
+    deriving (Show)
+
+nodeLeaf :: (HasBBox a) => a -> Node 'Z a
+nodeLeaf a = Node (bboxOf a) (Leaf a)
+
+node2 :: Node p a -> Node p a -> Node ('S p) a
+node2 ca cb =
+    Node
+        (bboxOf ca `hull` bboxOf cb)
+        (N2 ca cb)
+
+node3 :: Node p a -> Node p a -> Node p a -> Node ('S p) a
+node3 ca cb cc =
+    Node
+        (bboxOf ca `hull` bboxOf cb `hull` bboxOf cc)
+        (N3 ca cb cc)
+
+node4 :: Node p a -> Node p a -> Node p a -> Node p a -> Node ('S p) a
+node4 ca cb cc cd =
+    Node
+        (bboxOf ca `hull` bboxOf cb `hull` bboxOf cc `hull` bboxOf cd)
+        (N4 ca cb cc cd)
+
+nodeArrange5 ::
+    Node p a ->
+    Node p a ->
+    Node p a ->
+    Node p a ->
+    Node p a ->
+    OneOrTwo (Node ('S p) a)
+nodeArrange5 a b c d e =
+    getArg $ minimum $
+        [ two (node2 a b) (node3 c d e)
+        , two (node2 a c) (node3 b d e)
+        , two (node2 a d) (node3 b c e)
+        , two (node2 a e) (node3 b c d)
+        , two (node2 b c) (node3 a d e)
+        , two (node2 b d) (node3 a c e)
+        , two (node2 b e) (node3 a c d)
+        , two (node2 c d) (node3 a b e)
+        , two (node2 c e) (node3 a b d)
+        , two (node2 d e) (node3 a b c)
+        ]
+  where
+    two p q =
+        Arg
+            (bboxAreaOf p `tupPlus` bboxAreaOf q)
+            (Two p q)
+    tupPlus (ta, tb) (tc, td) = (ta + tc, tb + td)
+
+data RTree a
+    = forall p. FullT (PI p) (Node p a)
+    | EmptyT
+
+instance (Show a) => Show (RTree a) where
+    showsPrec _ EmptyT =
+        showString "EmptyT"
+    showsPrec di (FullT p0 n0) =
+        showParen (di > 10) $
+            showString "FullT " .
+            showsPrecNode 11 p0 n0
+
+instance Semigroup (RTree a) where
+    (<>) = treeMerge
+
+instance Monoid (RTree a) where
+    mempty = EmptyT
+
+instance Foldable RTree where
+    foldMap = go
+      where
+        go :: forall a m. (Monoid m) => (a -> m) -> RTree a -> m
+        go = coerce $ traverseStable @(Const m)
+    null EmptyT = True
+    null _ = False
+
+map :: (HasBBox b) => (a -> b) -> RTree a -> RTree b
+map = coerce $ traverse @Identity
+
+mapStable :: (a -> b) -> RTree a -> RTree b
+mapStable = coerce $ traverseStable @Identity
+
+traverse ::
+    (Applicative f, HasBBox b) =>
+    (a -> f b) ->
+    RTree a ->
+    f (RTree b)
+traverse _ EmptyT =
+    pure EmptyT
+traverse fn (FullT p0 n0) =
+    FullT p0 <$> traverseNode fn p0 n0
+
+traverseNode ::
+    (Applicative f, HasBBox b) =>
+    (a -> f b) ->
+    PI p ->
+    Node p a ->
+    f (Node p b)
+traverseNode fn p (Node _ ndata) =
+    case p of
+        ZI ->
+            nodeLeaf <$> fn (unwrapLeaf ndata)
+        SI np ->
+            case ndata of
+                N2 a b ->
+                    node2
+                        <$> traverseNode fn np a
+                        <*> traverseNode fn np b
+                N3 a b c ->
+                    node3
+                        <$> traverseNode fn np a
+                        <*> traverseNode fn np b
+                        <*> traverseNode fn np c
+                N4 a b c d ->
+                    node4
+                        <$> traverseNode fn np a
+                        <*> traverseNode fn np b
+                        <*> traverseNode fn np c
+                        <*> traverseNode fn np d
+
+traverseStable ::
+    (Applicative f) =>
+    (a -> f b) ->
+    RTree a ->
+    f (RTree b)
+traverseStable _ EmptyT =
+    pure EmptyT
+traverseStable fn (FullT p0 n0) =
+    FullT p0 <$> traverseStableNode fn p0 n0
+
+traverseStableNode ::
+    (Applicative f) =>
+    (a -> f b) ->
+    PI p ->
+    Node p a ->
+    f (Node p b)
+traverseStableNode fn p (Node nodeBBox ndata) =
+    case p of
+        ZI ->
+            Node nodeBBox . Leaf <$> fn (unwrapLeaf ndata)
+        SI np ->
+            fmap (Node nodeBBox) $
+                case ndata of
+                    N2 a b ->
+                        N2
+                            <$> traverseStableNode fn np a
+                            <*> traverseStableNode fn np b
+                    N3 a b c ->
+                        N3
+                            <$> traverseStableNode fn np a
+                            <*> traverseStableNode fn np b
+                            <*> traverseStableNode fn np c
+                    N4 a b c d ->
+                        N4
+                            <$> traverseStableNode fn np a
+                            <*> traverseStableNode fn np b
+                            <*> traverseStableNode fn np c
+                            <*> traverseStableNode fn np d
+
+treeMerge ::
+    RTree a ->
+    RTree a ->
+    RTree a
+treeMerge EmptyT b =
+    b
+treeMerge b EmptyT =
+    b
+treeMerge (FullT pa na) (FullT pb nb) = do
+    case comparePI pa pb of
+        LTPI pd ->
+            case nodeMergeBiased (SI pd) nb pa na of
+                One nr ->
+                    FullT pb nr
+                Two nr ns ->
+                    FullT (SI pb) (node2 nr ns)
+        EQPI ->
+            case nodeMergeSymmetric pa na nb of
+                One nr ->
+                    FullT pa nr
+                Two nr ns ->
+                    FullT (SI pa) (node2 nr ns)
+        GTPI pd ->
+            case nodeMergeBiased (SI pd) na pb nb of
+                One nr ->
+                    FullT pa nr
+                Two nr ns ->
+                    FullT (SI pa) (node2 nr ns)
+
+nodeMergeSymmetric ::
+    PI p ->
+    Node p a ->
+    Node p a ->
+    OneOrTwo (Node p a)
+nodeMergeSymmetric p na nb =
+    case p of
+        SI _
+            | Node box1 (N2 a b) <- na
+            , Node box2 (N2 e f) <- nb ->
+                One (Node (box1 `hull` box2) (N4 a b e f))
+            | Node _ (N3 a b c) <- na
+            , Node _ (N2 e f) <- nb ->
+                nodeArrange5 a b c e f
+            | Node _ (N2 a b) <- na
+            , Node _ (N3 e f g) <- nb ->
+                nodeArrange5 a b e f g
+        _ ->
+            Two na nb
+
+nodeMergeBiased ::
+    PI pd ->
+    Node (Add pd p2) a ->
+    PI p2 ->
+    Node p2 a ->
+    OneOrTwo (Node (Add pd p2) a)
+nodeMergeBiased ZI na pb nb =
+    nodeMergeSymmetric pb na nb
+nodeMergeBiased (SI npd) (Node abox aelems) pb nb =
+    getArg $ minimum $
+        case aelems of
+            N2 a1 a2 ->
+                [ var2 a1 a2
+                , var2 a2 a1
+                ]
+            N3 a1 a2 a3 ->
+                [ var3 a1 a2 a3
+                , var3 a2 a1 a3
+                , var3 a3 a1 a2
+                ]
+            N4 a1 a2 a3 a4 ->
+                [ var4 a1 a2 a3 a4
+                , var4 a2 a1 a3 a4
+                , var4 a3 a1 a2 a4
+                , var4 a4 a1 a2 a3
+                ]
+  where
+    abox' = abox `hull` bboxOf nb
+    var2 e1 e2 =
+        Arg
+            (bboxAreaOf (bboxOf e1 `hull` bboxOf nb) `tupMinus` bboxAreaOf e1)
+            (case nodeMergeBiased npd e1 pb nb of
+                One e1' ->
+                    One (Node abox' (N2 e1' e2))
+                Two e1' en ->
+                    One (Node abox' (N3 e1' en e2))
+            )
+    var3 e1 e2 e3 =
+        Arg
+            (bboxAreaOf (bboxOf e1 `hull` bboxOf nb) `tupMinus` bboxAreaOf e1)
+            (case nodeMergeBiased npd e1 pb nb of
+                One e1' ->
+                    One (Node abox' (N3 e1' e2 e3))
+                Two e1' en ->
+                    One (Node abox' (N4 e1' en e2 e3))
+            )
+    var4 e1 e2 e3 e4 =
+        Arg
+            (bboxAreaOf (bboxOf e1 `hull` bboxOf nb) `tupMinus` bboxAreaOf e1)
+            (case nodeMergeBiased npd e1 pb nb of
+                One e1' ->
+                    One (Node abox' (N4 e1' e2 e3 e4))
+                Two e1' en ->
+                    nodeArrange5 e1' en e2 e3 e4
+            )
+    tupMinus (ta, tb) (tc, td) = (ta - tc, tb - td)
+
+empty :: RTree a
+empty = EmptyT
+
+singleton ::
+    (HasBBox a) =>
+    a ->
+    RTree a
+singleton x = FullT ZI (nodeLeaf x)
+
+insert ::
+    (HasBBox a) =>
+    a ->
+    RTree a ->
+    RTree a
+insert x EmptyT = singleton x
+insert x (FullT p node) =
+    case nodeInsert p node (nodeLeaf x) of
+        One nr -> FullT p nr
+        Two nr ns -> FullT (SI p) (node2 nr ns)
+
+nodeInsert ::
+    PI p ->
+    Node p a ->
+    Node 'Z a ->
+    OneOrTwo (Node p a)
+nodeInsert ZI na nb =
+    Two na nb
+nodeInsert (SI ZI) (Node abox aelems) nb@(Node bbox _) =
+    case aelems of
+        N2 a1 a2 ->
+            One $ Node (abox `hull` bbox) (N3 a1 a2 nb)
+        N3 a1 a2 a3 ->
+            One $ Node (abox `hull` bbox) (N4 a1 a2 a3 nb)
+        N4 a1 a2 a3 a4 ->
+            nodeArrange5 a1 a2 a3 a4 nb
+nodeInsert (SI np) (Node abox aelems) nb =
+    getArg $ minimum $
+        case aelems of
+            N2 a1 a2 ->
+                [ var2 a1 a2
+                , var2 a2 a1
+                ]
+            N3 a1 a2 a3 ->
+                [ var3 a1 a2 a3
+                , var3 a2 a1 a3
+                , var3 a3 a1 a2
+                ]
+            N4 a1 a2 a3 a4 ->
+                [ var4 a1 a2 a3 a4
+                , var4 a2 a1 a3 a4
+                , var4 a3 a1 a2 a4
+                , var4 a4 a1 a2 a3
+                ]
+  where
+    abox' = abox `hull` bboxOf nb
+    var2 e1 e2 =
+        Arg
+            (bboxAreaOf (bboxOf e1 `hull` bboxOf nb) `tupMinus` bboxAreaOf e1)
+            (case nodeInsert np e1 nb of
+                One e1' ->
+                    One (Node abox' (N2 e1' e2))
+                Two e1' en ->
+                    One (Node abox' (N3 e1' en e2))
+            )
+    var3 e1 e2 e3 =
+        Arg
+            (bboxAreaOf (bboxOf e1 `hull` bboxOf nb) `tupMinus` bboxAreaOf e1)
+            (case nodeInsert np e1 nb of
+                One e1' ->
+                    One (Node abox' (N3 e1' e2 e3))
+                Two e1' en ->
+                    One (Node abox' (N4 e1' en e2 e3))
+            )
+    var4 e1 e2 e3 e4 =
+        Arg
+            (bboxAreaOf (bboxOf e1 `hull` bboxOf nb) `tupMinus` bboxAreaOf e1)
+            (case nodeInsert np e1 nb of
+                One e1' ->
+                    One (Node abox' (N4 e1' e2 e3 e4))
+                Two e1' en ->
+                    nodeArrange5 e1' en e2 e3 e4
+            )
+    tupMinus (ta, tb) (tc, td) = (ta - tc, tb - td)
+
+fromList ::
+    (HasBBox a, Foldable t) =>
+    t a ->
+    RTree a
+fromList = foldr insert empty
+
+traverseIntersecting ::
+    (Applicative f, HasBBox a) =>
+    (BBox -> Bool) ->
+    (a -> f a) ->
+    RTree a ->
+    f (RTree a)
+traverseIntersecting _ _ EmptyT =
+    pure EmptyT
+traverseIntersecting bboxTest fn (FullT p node) =
+    FullT p <$> traverseIntersectingNode bboxTest p node fn
+
+traverseIntersectingNode ::
+    (HasBBox a, Applicative f) =>
+    (BBox -> Bool) ->
+    PI p ->
+    Node p a ->
+    (a -> f a) ->
+    f (Node p a)
+traverseIntersectingNode bboxTest p node@(Node nodeBBox ndata) fn
+    | bboxTest nodeBBox =
+        case p of
+            ZI ->
+                nodeLeaf <$> fn (unwrapLeaf ndata)
+            SI np ->
+                case ndata of
+                    N2 a b ->
+                        node2
+                            <$> traverseIntersectingNode bboxTest np a fn
+                            <*> traverseIntersectingNode bboxTest np b fn
+                    N3 a b c ->
+                        node3
+                            <$> traverseIntersectingNode bboxTest np a fn
+                            <*> traverseIntersectingNode bboxTest np b fn
+                            <*> traverseIntersectingNode bboxTest np c fn
+                    N4 a b c d ->
+                        node4
+                            <$> traverseIntersectingNode bboxTest np a fn
+                            <*> traverseIntersectingNode bboxTest np b fn
+                            <*> traverseIntersectingNode bboxTest np c fn
+                            <*> traverseIntersectingNode bboxTest np d fn
+    | otherwise =
+        pure node
+
+foldMapStructured ::
+    (Monoid m) =>
+    (a -> m) ->
+    (Int -> BBox -> [m] -> m) ->
+    RTree a ->
+    m
+foldMapStructured _ _ EmptyT =
+    mempty
+foldMapStructured fnLeaf fnBranch (FullT p node) =
+    foldMapStructuredNode fnLeaf fnBranch p node
+
+foldMapStructuredNode ::
+    (Monoid m) =>
+    (a -> m) ->
+    (Int -> BBox -> [m] -> m) ->
+    PI p ->
+    Node p a ->
+    m
+foldMapStructuredNode fnLeaf fnBranch p (Node nodeBBox ndata) =
+    case p of
+        ZI ->
+            fnLeaf (unwrapLeaf ndata)
+        SI np ->
+            fnBranch
+                (piToInt p)
+                nodeBBox
+                (fmap
+                    (foldMapStructuredNode fnLeaf fnBranch np)
+                    (subnodeList ndata)
+                )
+
+foldMapIntersecting ::
+    (Monoid m) =>
+    (BBox -> Bool) ->
+    (a -> m) ->
+    RTree a ->
+    m
+foldMapIntersecting _ _ EmptyT =
+    mempty
+foldMapIntersecting bboxTest fn (FullT p node) =
+    foldMapIntersectingNode bboxTest fn p node
+
+foldMapIntersectingNode ::
+    (Monoid m) =>
+    (BBox -> Bool) ->
+    (a -> m) ->
+    PI p ->
+    Node p a ->
+    m
+foldMapIntersectingNode bboxTest fn p (Node nodeBBox ndata)
+    | bboxTest nodeBBox =
+        case p of
+            ZI ->
+                fn (unwrapLeaf ndata)
+            SI np ->
+                foldMap
+                    (foldMapIntersectingNode bboxTest fn np)
+                    (subnodeList ndata)
+    | otherwise =
+        mempty
+
+foldrIntersecting ::
+    (BBox -> Bool) ->
+    (a -> r -> r) ->
+    r ->
+    RTree a ->
+    r
+foldrIntersecting bboxTest fn seed t =
+    appEndo (foldMapIntersecting bboxTest (Endo . fn) t) seed
+
+concatTraverseIntersecting ::
+    (Applicative f) =>
+    (BBox -> Bool) ->
+    (a -> f (RTree a)) ->
+    RTree a ->
+    f (RTree a)
+concatTraverseIntersecting _ _ EmptyT =
+    pure EmptyT
+concatTraverseIntersecting bboxTest fn (FullT p node) =
+    concatTraverseIntersectingNode bboxTest fn p node
+
+concatTraverseIntersectingNode ::
+    (Applicative f) =>
+    (BBox -> Bool) ->
+    (a -> f (RTree a)) ->
+    PI p ->
+    Node p a ->
+    f (RTree a)
+concatTraverseIntersectingNode bboxTest fn p node@(Node nodeBBox ndata)
+    | bboxTest nodeBBox =
+        case p of
+            ZI ->
+                fn (unwrapLeaf ndata)
+            SI np ->
+                fmap fold $
+                    Data.Traversable.traverse
+                        (concatTraverseIntersectingNode bboxTest fn np)
+                        (subnodeList ndata)
+    | otherwise =
+        pure (FullT p node)
+
+concatMapIntersecting ::
+    (BBox -> Bool) ->
+    (a -> RTree a) ->
+    RTree a ->
+    RTree a
+concatMapIntersecting =
+    coerce (concatTraverseIntersecting @Identity)
+
+filterCoarseIntersecting ::
+    (BBox -> Bool) ->
+    RTree a ->
+    RTree a
+filterCoarseIntersecting _ EmptyT =
+    EmptyT
+filterCoarseIntersecting bboxTest (FullT p node)
+    | bboxTest (bboxOf node) =
+        filterCoarseIntersectingNode bboxTest p node
+    | otherwise =
+        EmptyT
+
+{- assumes that bboxTest (bboxOf node) == True -}
+filterCoarseIntersectingNode ::
+    (BBox -> Bool) ->
+    PI p ->
+    Node p a ->
+    RTree a
+filterCoarseIntersectingNode bboxTest p node@(Node _ ndata) =
+    case p of
+        ZI ->
+            FullT p node
+        SI np -> do
+            let interiorSubnodes =
+                    List.filter (bboxTest . bboxOf) $
+                    subnodeList ndata
+            case interiorSubnodes of
+                [a] ->
+                    filterCoarseIntersectingNode bboxTest np a
+                [a, b] ->
+                    FullT p (node2 a b)
+                [a, b, c] ->
+                    FullT p (node3 a b c)
+                [a, b, c, d] ->
+                    FullT p (node4 a b c d)
+                _ ->
+                    EmptyT
+
+concatTraverseIntersectingTree ::
+    (Applicative f) =>
+    (RTree a -> BBox -> f (RTree c)) ->
+    (a -> RTree b -> f (RTree c)) ->
+    RTree a ->
+    RTree b ->
+    f (RTree c)
+concatTraverseIntersectingTree _ _ EmptyT _ =
+    pure EmptyT
+concatTraverseIntersectingTree onClear onIntersect (FullT p node) btree =
+    concatTraverseIntersectingTreeNode onClear onIntersect p node btree
+
+concatTraverseIntersectingTreeNode ::
+    (Applicative f) =>
+    (RTree a -> BBox -> f (RTree c)) ->
+    (a -> RTree b -> f (RTree c)) ->
+    PI p ->
+    Node p a ->
+    RTree b ->
+    f (RTree c)
+concatTraverseIntersectingTreeNode onClear onIntersect p node@(Node nodeBBox ndata) btree
+    | null filteredBTree =
+        onClear (FullT p node) nodeBBox
+    | otherwise =
+        case p of
+            ZI ->
+                onIntersect (unwrapLeaf ndata) btree
+            SI np ->
+                fmap fold $
+                    Data.Traversable.traverse
+                        (\s ->
+                            concatTraverseIntersectingTreeNode
+                                onClear onIntersect np s btree
+                        )
+                        (subnodeList ndata)
+  where
+    filteredBTree = filterCoarseIntersecting (overlaps nodeBBox) btree
+
+concatMapIntersectingTree ::
+    (RTree a -> BBox -> RTree c) ->
+    (a -> RTree b -> RTree c) ->
+    RTree a ->
+    RTree b ->
+    RTree c
+concatMapIntersectingTree =
+    coerce $ concatTraverseIntersectingTree @Identity
+
+xAxisRaycast ::
+    (Semigroup r) =>
+    Vec3 ->
+    (a -> Maybe (Rational, r)) ->
+    RTree a ->
+    Maybe r
+xAxisRaycast (Vec3 vx vy vz) fn rtree = do
+    case rtree of
+        FullT p node ->
+            fmap snd $
+                xAxisRaycastNode (XRay3 vy vz) vx fn p node Nothing
+        EmptyT ->
+            Nothing
+
+xAxisRaycastNode ::
+    (Semigroup r) =>
+    XRay3 ->
+    Rational ->
+    (a -> Maybe (Rational, r)) ->
+    PI p ->
+    Node p a ->
+    Maybe (Rational, r) ->
+    Maybe (Rational, r)
+xAxisRaycastNode xray xmax fn p (Node _ ndata) = do
+    case p of
+        ZI -> \mbOldState -> do
+            case fn (unwrapLeaf ndata) of
+                mbNewState@(Just (newX, newResult))
+                    | newX < xmax ->
+                        case mbOldState of
+                            Nothing -> mbNewState
+                            Just (oldX, oldResult)
+                                | oldX < newX ->
+                                    mbNewState
+                                | oldX > newX ->
+                                    mbOldState
+                                | otherwise ->
+                                    Just (oldX, oldResult <> newResult)
+                _ -> mbOldState
+        SI np -> do
+            let filteredSubnodes = do
+                    sn <- subnodeList ndata
+                    let snbox = bboxOf sn
+                    guard $ bboxContainsXRay3 xray snbox
+                    let Interval x1 x2 = bboxXInterval snbox
+                    guard $ x1 < xmax
+                    [(x2, sn)]
+            go (insertionSortDesc filteredSubnodes)
+          where
+            go [] mbOldState = do
+                mbOldState
+            go ((x2, subnode) : otherSubnodes) mbOldState = do
+                let mbNewState =
+                        xAxisRaycastNode xray xmax fn np subnode mbOldState
+                case mbOldState of
+                    Just (oldX, _)
+                        | oldX > x2 ->
+                            mbOldState
+                    _ -> do
+                        go otherSubnodes mbNewState
+
+insertionSortDesc ::
+    (Ord k) =>
+    [(k, v)] ->
+    [(k, v)]
+insertionSortDesc = foldr insertOrderedDesc []
+
+insertOrderedDesc ::
+    (Ord k) =>
+    (k, v) ->
+    [(k, v)] ->
+    [(k, v)]
+insertOrderedDesc kv@(k, _) = go
+  where
+    go list
+        | h@(k2, _) : rest <- list
+        , k < k2 =
+            h : go rest
+        | otherwise =
+            kv : list
+
+bboxArea :: BBox -> (Rational, Rational)
+bboxArea (BBox (Interval ax bx) (Interval ay by) (Interval az bz))
+    | ax <= bx && ay <= by && az <= bz = do
+        let x = bx - ax
+        let y = by - ay
+        let z = bz - az
+        (x*(y + z) + y*z, x+y+z)
+bboxArea _ = (0, 0)
+
+bboxAreaOf :: (HasBBox a) => a -> (Rational, Rational)
+bboxAreaOf = bboxArea . bboxOf
+
+getArg :: Arg a b -> b
+getArg (Arg _ b) = b
+
+instance (Aeson.ToJSON a) => Aeson.ToJSON (RTree a) where
+    toJSON EmptyT = Aeson.Null
+    toJSON (FullT p n) =
+        Aeson.object
+            [ "depth" Aeson..= piToInt p
+            , "tree" Aeson..= withKnownP (Aeson.toJSON n) p
+            ]
+
+instance (Aeson.ToJSON a, KnownP p) => Aeson.ToJSON (Node p a) where
+    toJSON (Node _ ndata) =
+        case knownPI @p of
+            ZI ->
+                Aeson.toJSON (unwrapLeaf ndata)
+            SI np ->
+                withKnownP (Aeson.toJSON (subnodeList ndata)) np
+
+instance (Aeson.FromJSON a, HasBBox a) => Aeson.FromJSON (RTree a) where
+    parseJSON Aeson.Null =
+        pure EmptyT
+    parseJSON value = flip (Aeson.withObject "RTree") value $ \obj -> do
+        depth <- obj Aeson..: "depth"
+        withPIFromInt depth $ \p -> do
+            n <- withKnownP (obj Aeson..: "tree") p
+            pure $ FullT p n
+
+instance (Aeson.FromJSON a, HasBBox a, KnownP p) => Aeson.FromJSON (Node p a) where
+    parseJSON value =
+        case knownPI @p of
+            ZI ->
+                fmap nodeLeaf $ Aeson.parseJSON value
+            SI np ->
+                withKnownP (Aeson.parseJSON value) np >>= toNodeBranch
+      where
+        toNodeBranch [a, b] = pure $ node2 a b
+        toNodeBranch [a, b, c] = pure $ node3 a b c
+        toNodeBranch [a, b, c, d] = pure $ node4 a b c d
+        toNodeBranch _ = fail "bad node"

@@ -1,0 +1,6 @@
+.stack-work/
+*~
+maps/
+dump/
+info/
+*.nb
